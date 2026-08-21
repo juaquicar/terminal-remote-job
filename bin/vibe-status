@@ -73,6 +73,49 @@ for a in claude opencode codex; do
     if [ -n "$p" ]; then ok "$a  ->  $p"; else bad "$a no encontrado"; fi
 done
 
+head_ "Servicios expuestos"
+# Todo lo que escuche en 0.0.0.0, :: o * esta accesible desde CUALQUIER red a
+# la que este conectado el equipo: el tailnet, si, pero tambien el WiFi del
+# hotel o de la cafeteria. Lo atado a 127.0.0.1 no sale de la maquina.
+#
+# Es facil acumular servicios asi sin darse cuenta -- un dev server que se dejo
+# con --host, escritorio remoto, un contenedor con -p 0.0.0.0. Este bloque los
+# saca a la luz; no los cierra, porque cuales son legitimos solo lo sabes tu.
+EXPUESTOS="$(ss -tlnH 2>/dev/null \
+    | awk '{print $4}' \
+    | grep -E '^(0\.0\.0\.0|\*|\[::\]):' \
+    | sed 's/.*://' \
+    | sort -nu)"
+
+if [ -z "$EXPUESTOS" ]; then
+    ok "nada escuchando en todas las interfaces"
+else
+    n=$(printf '%s\n' "$EXPUESTOS" | wc -l)
+    warn "$n puerto(s) en TODAS las interfaces, no solo en el tailnet:"
+    for port in $EXPUESTOS; do
+        # El nombre del proceso solo aparece si el proceso es tuyo o eres root.
+        proc="$(ss -tlnpH "sport = :$port" 2>/dev/null \
+                | grep -oE 'users:\(\("[^"]+' | head -1 | sed 's/.*"//')"
+        case "$port" in
+            22)   nota="SSH (esperado)" ;;
+            3389) nota="escritorio remoto: control total del equipo" ;;
+            5900) nota="VNC: control total del equipo" ;;
+            *)    nota="" ;;
+        esac
+        printf '        %-6s %-16s %s\n' "$port" "${proc:-?}" "$nota"
+    done
+    printf '        Comprobar quien es:  sudo ss -tlnp\n'
+    printf '        Limitarlos al tailnet: %s/docs/troubleshooting.md\n' "$AR_HOME"
+fi
+
+if command -v ufw >/dev/null 2>&1; then
+    if ufw status 2>/dev/null | head -1 | grep -qi inactive; then
+        warn "ufw inactivo: esos puertos no los filtra nadie"
+    elif ! ufw status >/dev/null 2>&1; then
+        printf '        (ufw necesita sudo para consultarse)\n'
+    fi
+fi
+
 head_ "Suspension del portatil"
 # Si el equipo se suspende, las sesiones tmux siguen vivas pero inaccesibles
 # desde el movil hasta que vuelva a despertar.

@@ -216,6 +216,66 @@ Font. Blink permite instalar fuentes personalizadas.
 
 ---
 
+## Servicios expuestos sin querer
+
+`vibe-status` avisa de todo lo que escuche en `0.0.0.0`, `*` o `[::]`:
+
+```
+Servicios expuestos
+  AVISO 7 puerto(s) en TODAS las interfaces, no solo en el tailnet:
+        22     ?                SSH (esperado)
+        3000   ?
+        3389   gnome-remote-de  escritorio remoto: control total del equipo
+```
+
+**Escuchar en `0.0.0.0` no significa "accesible desde el tailnet".** Significa
+accesible desde **cualquier** red a la que esté conectado el equipo: el tailnet
+sí, pero también el WiFi del hotel, el de la cafetería o el de la oficina del
+cliente. Con `ufw` inactivo, no hay nada filtrando.
+
+Se acumulan solos: un dev server que quedó con `--host`, un contenedor lanzado
+con `-p 0.0.0.0:8080`, el escritorio remoto que activaste una vez para probar.
+
+Ver quién es cada uno (con `sudo`, si no no salen los nombres):
+
+```bash
+sudo ss -tlnp
+```
+
+### Los tres casos y qué hacer
+
+**1. Debería ser solo local.** Átalo a `127.0.0.1`. En Docker, `-p 127.0.0.1:8080:8080`
+en vez de `-p 8080:8080`.
+
+**2. Lo quieres desde el móvil, pero solo desde el tailnet.** Átalo a la IP del
+tailnet en lugar de a todas las interfaces:
+
+```bash
+# En vez de escuchar en 0.0.0.0
+vite --host 100.x.y.z
+```
+
+O deja `0.0.0.0` y activa el firewall, que es más cómodo si son varios
+servicios. `install.sh` ya dejó las reglas de SSH y mosh sobre `tailscale0`;
+añade las tuyas y luego activa `ufw`:
+
+```bash
+sudo ufw allow in on tailscale0 to any port 5173 proto tcp
+sudo ufw default deny incoming
+sudo ufw enable
+```
+
+> Antes de `ufw enable`, revisa `sudo ufw status numbered` y asegúrate de que
+> la regla del 22 sobre `tailscale0` está. Activar el firewall sin ella te deja
+> fuera de tu propia máquina si estás en remoto.
+
+**3. Escritorio remoto (3389 RDP, 5900 VNC).** Es control total del equipo, no
+un servicio más. Si lo usas, restríngelo al tailnet como en el caso 2. Si no lo
+usas, apágalo: **Configuración → Sistema → Escritorio remoto**. Una superficie
+de ataque menos, gratis.
+
+---
+
 ## `claude` me mete en tmux y ahora no quiero eso
 
 Es `vibe-hook.sh`, que `~/.bashrc` carga. Hace que los agentes nazcan siempre

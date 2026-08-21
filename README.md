@@ -298,6 +298,9 @@ criterios que sigue:
   restaura el valor a los 30 segundos pase lo que pase.
 - **Las operaciones que pueden matar un proceso piden confirmación** escribiendo
   `SI`, y muestran antes qué se va a tocar.
+- **`vibe-status` audita lo que tienes expuesto.** Avisa de todo lo que escuche
+  en `0.0.0.0` y no solo en el tailnet, y marca los casos graves — escritorio
+  remoto, VNC. No lo cierra: cuáles son legítimos solo lo sabes tú.
 
 > [!WARNING]
 > Una terminal web es una shell con tus tokens y claves SSH al alcance. No

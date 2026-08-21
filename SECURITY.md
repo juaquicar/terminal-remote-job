@@ -45,6 +45,11 @@ El diseño asume que:
   acotada, nunca se ejecutan enteros como root, y `vibe-adopt` se niega
   explícitamente a correr bajo `sudo`.
 
+También conviene saber que `install.sh` **no audita ni cierra** los servicios
+que ya tuvieras escuchando. `vibe-status` los lista y avisa, pero decidir
+cuáles son legítimos es cosa tuya. Ver "Servicios expuestos sin querer" en
+[`docs/troubleshooting.md`](docs/troubleshooting.md).
+
 Lo que **sí** se defiende:
 
 - Que nada quede escuchando en `0.0.0.0` sin que lo hayas pedido.

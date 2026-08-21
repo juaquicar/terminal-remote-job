@@ -135,6 +135,7 @@ vibe-status                                    # qué falta, qué corre, IP
 sudo journalctl -u ssh -f                      # ver por qué rechaza SSH
 namei -l ~/.ssh/authorized_keys                # permisos de toda la cadena
 tmux ls                                        # sesiones vivas
+sudo ss -tlnp                                  # qué servicios tienes expuestos
 ```
 
 ---
