@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+#
+# vibe-web - Expone la sesion tmux como terminal web (ttyd), opcionalmente a
+# traves de un tunel rapido de Cloudflare.
+#
+# Uso:
+#   vibe-web              ttyd solo en 127.0.0.1:7681.
+#                         Para publicarlo, usa un tunel con nombre + Cloudflare
+#                         Access (ver docs/cloudflare-tunnel.md).
+#   vibe-web --quick      Ademas abre un tunel trycloudflare.com temporal.
+#   vibe-web -p PUERTO    Cambia el puerto local (por defecto 7681).
+#
+# SEGURIDAD
+#   ttyd da una shell completa con tus credenciales dentro. Este script:
+#     - lo ata SIEMPRE a 127.0.0.1, nunca a 0.0.0.0
+#     - genera una contrasena aleatoria en cada arranque
+#     - mata ttyd y el tunel al salir
+#   Con --quick la URL es publica y la unica barrera es esa contrasena. Para
+#   uso habitual monta un tunel con nombre y Cloudflare Access delante.
+#
+set -euo pipefail
+
+# Raiz del proyecto, deducida de la ubicacion real de este script: asi funciona
+# clonado en cualquier sitio, y tambien a traves de un symlink en el PATH.
+AR_HOME="${AR_HOME:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)}"
+SESSION="${VIBE_SESSION:-vibe}"
+PORT=7681
+QUICK=0
+
+die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+info() { printf '\033[36m::\033[0m %s\n' "$*"; }
+warn() { printf '\033[33m!!\033[0m %s\n' "$*"; }
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --quick)   QUICK=1; shift ;;
+        -p|--port) PORT="${2:?-p necesita un puerto}"; shift 2 ;;
+        -h|--help) sed -n '3,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *)         die "opcion desconocida: $1" ;;
+    esac
+done
+
+command -v ttyd >/dev/null || die "ttyd no instalado. Ejecuta: $AR_HOME/install.sh --web"
+[ $QUICK -eq 1 ] && { command -v cloudflared >/dev/null || die "cloudflared no instalado. Ejecuta: $AR_HOME/install.sh --web"; }
+
+# shellcheck source=/dev/null
+[ -f "$AR_HOME/bin/env.sh" ] && source "$AR_HOME/bin/env.sh"
+
+# Levantar la sesion si no existe.
+tmux has-session -t "=$SESSION" 2>/dev/null || "$AR_HOME/bin/vibe" start
+
+USER_WEB="vibe"
+PASS_WEB="$(head -c 18 /dev/urandom | base64 | tr -d '/+=' | head -c 20)"
+
+TTYD_PID=""
+CF_PID=""
+cleanup() {
+    printf '\n'
+    [ -n "$CF_PID" ]   && kill "$CF_PID"   2>/dev/null && info "tunel cerrado"
+    [ -n "$TTYD_PID" ] && kill "$TTYD_PID" 2>/dev/null && info "ttyd detenido"
+    exit 0
+}
+trap cleanup INT TERM
+
+info "arrancando ttyd en 127.0.0.1:$PORT"
+# -i 127.0.0.1  solo loopback
+# -c user:pass  Basic Auth
+# -W            terminal escribible (sin esto seria solo lectura)
+# -t            opciones del terminal del navegador
+ttyd -i 127.0.0.1 -p "$PORT" \
+     -c "${USER_WEB}:${PASS_WEB}" \
+     -W \
+     -t fontSize=15 -t 'theme={"background":"#101014"}' \
+     -T xterm-256color \
+     tmux -f "$AR_HOME/config/tmux.conf" new-session -A -s "$SESSION" \
+     >/tmp/vibe-web-ttyd.log 2>&1 &
+TTYD_PID=$!
+
+sleep 1
+kill -0 "$TTYD_PID" 2>/dev/null || { cat /tmp/vibe-web-ttyd.log; die "ttyd no arranco"; }
+
+printf '\n  \033[1mUsuario:\033[0m %s\n  \033[1mClave:\033[0m   %s\n\n' "$USER_WEB" "$PASS_WEB"
+printf '  Local:  http://127.0.0.1:%s\n' "$PORT"
+
+if [ $QUICK -eq 1 ]; then
+    warn "tunel rapido: la URL sera PUBLICA y sin Cloudflare Access."
+    warn "La unica proteccion es la clave de arriba. No lo dejes corriendo."
+    info "abriendo tunel..."
+    cloudflared tunnel --url "http://127.0.0.1:$PORT" --no-autoupdate \
+        2>&1 | tee /tmp/vibe-web-cf.log | grep --line-buffered -oE 'https://[a-z0-9-]+\.trycloudflare\.com' &
+    CF_PID=$!
+else
+    printf '\n  Para publicarlo con dominio propio y Cloudflare Access:\n'
+    printf '    %s/docs/cloudflare-tunnel.md\n' "$AR_HOME"
+fi
+
+printf '\n  Ctrl+c para parar todo.\n\n'
+wait

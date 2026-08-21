@@ -216,3 +216,23 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- terminal-remote-job ---------------------------------------------------
+*.local
+*.bak
+*.bak-*
+*.original.md
+
+# Restos de ejecucion
+/tmp/
+*.log
+.DS_Store
+
+# Credenciales: nunca, bajo ningun concepto
+*.pem
+*.key
+id_*
+!bin/*
+authorized_keys
+known_hosts
+.cloudflared/

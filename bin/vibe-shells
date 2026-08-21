@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+#
+# vibe-shells - Lista las shells que tienes abiertas fuera de tmux y, si lo
+# pides, crea en tmux una ventana equivalente por cada una.
+#
+# Uso:
+#   vibe-shells              Lista las shells y donde esta cada una.
+#   vibe-shells --clone      Crea una ventana de tmux por shell, arrancada en
+#                            su mismo directorio.
+#   vibe-shells --all        Incluye tambien las que ya estan dentro de tmux.
+#   vibe-shells -s NOMBRE    Sesion destino (por defecto: vibe).
+#
+# CLONAR NO ES ADOPTAR. Las shells originales siguen intactas en su terminal;
+# esto solo abre otras nuevas, dentro de tmux, en el mismo sitio.
+#
+# Por que no se adoptan de verdad: una bash interactiva es el peor caso de
+# reptyr. Es lider de sesion y de grupo de procesos, y el control de trabajos
+# no sobrevive al cambio de pty. El modo -T existe para eso, pero falla con los
+# emuladores de modelo cliente-servidor (Ptyxis, GNOME Terminal, Konsole).
+#
+# Tampoco hace falta: una shell no guarda nada que se pierda salvo el
+# directorio y el historial. El directorio lo replica esto; el historial es el
+# mismo archivo (~/.bash_history), asi que ya lo tienes.
+#
+# Para un AGENTE con horas de contexto encima si merece la pena adoptarlo de
+# verdad: eso es `vibe-adopt`.
+#
+set -euo pipefail
+
+# Raiz del proyecto, deducida de la ubicacion real de este script: asi funciona
+# clonado en cualquier sitio, y tambien a traves de un symlink en el PATH.
+AR_HOME="${AR_HOME:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)}"
+SESSION="${VIBE_SESSION:-vibe}"
+CLONE=0
+INCLUDE_TMUX=0
+
+die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+info() { printf '\033[36m::\033[0m %s\n' "$*"; }
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --clone|-c)   CLONE=1; shift ;;
+        --all|-a)     INCLUDE_TMUX=1; shift ;;
+        -s|--session) SESSION="${2:?-s necesita un nombre}"; shift 2 ;;
+        -h|--help)    sed -n '3,27p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *)            die "opcion desconocida: $1" ;;
+    esac
+done
+
+# --- Quien aloja a esa shell ------------------------------------------------
+# Se sube por el arbol de procesos hasta encontrar algo reconocible. Sirve para
+# distinguir una shell de Ptyxis de una de PyCharm o de una que ya esta en tmux.
+host_of() {
+    local pid="$1" tree
+    tree="$(pstree -sp "$pid" 2>/dev/null || true)"
+    case "$tree" in
+        *tmux*)     echo "tmux" ;;
+        *ptyxis*)   echo "ptyxis" ;;
+        *pycharm*)  echo "pycharm" ;;
+        *code*)     echo "vscode" ;;
+        *sshd*)     echo "ssh" ;;
+        *gnome-terminal*) echo "gnome-term" ;;
+        *konsole*)  echo "konsole" ;;
+        *)          echo "?" ;;
+    esac
+}
+
+# --- Recogida ---------------------------------------------------------------
+# Solo lideres de sesion: es lo que distingue "la shell de la pestana" de las
+# subshells que lanza cualquier script y que no interesan aqui.
+FOUND=()
+while read -r pid sid tty comm; do
+    [ "$pid" = "$sid" ] || continue
+    host="$(host_of "$pid")"
+    [ "$host" = "tmux" ] && [ $INCLUDE_TMUX -eq 0 ] && continue
+    cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null || echo '?')"
+    FOUND+=("$pid|$tty|$host|$cwd|$comm")
+done < <(ps -eo pid,sid,tty,comm --no-headers \
+         | awk '$3 != "?" && ($4=="bash"||$4=="zsh"||$4=="fish")')
+
+if [ ${#FOUND[@]} -eq 0 ]; then
+    if [ $INCLUDE_TMUX -eq 0 ]; then
+        info "no hay ninguna shell fuera de tmux. Todo lo tuyo ya es accesible"
+        info "desde el movil. (Con --all se listan tambien las de dentro.)"
+    else
+        info "no hay shells interactivas"
+    fi
+    exit 0
+fi
+
+# --- Listado ----------------------------------------------------------------
+printf '\n\033[1m%-8s %-8s %-11s %s\033[0m\n' PID TTY DONDE DIRECTORIO
+for row in "${FOUND[@]}"; do
+    IFS='|' read -r pid tty host cwd comm <<< "$row"
+    [ "$host" = "tmux" ] && col="\033[2m" || col=""
+    printf "${col}%-8s %-8s %-11s %s\033[0m\n" "$pid" "$tty" "$host" "$cwd"
+done
+
+if [ $CLONE -eq 0 ]; then
+    printf '\n  Para abrirlas dentro de tmux, en su mismo directorio:\n'
+    printf '    vibe-shells --clone\n\n'
+    exit 0
+fi
+
+# --- Clonado ----------------------------------------------------------------
+# shellcheck source=/dev/null
+[ -f "$AR_HOME/bin/env.sh" ] && source "$AR_HOME/bin/env.sh"
+
+tmux has-session -t "=$SESSION" 2>/dev/null || {
+    info "la sesion '$SESSION' no existe, la creo"
+    "$AR_HOME/bin/vibe" start -s "$SESSION" >/dev/null
+}
+
+printf '\n'
+
+# Se parte de los directorios que YA tienen ventana en la sesion. Sin esto,
+# ejecutar --clone dos veces duplicaba ventanas sobre el mismo sitio.
+SEEN=""
+while read -r p; do
+    [ -n "$p" ] && SEEN="$SEEN|$p|"
+done < <(tmux list-panes -s -t "=$SESSION" -F '#{pane_current_path}' 2>/dev/null || true)
+
+N=0
+for row in "${FOUND[@]}"; do
+    IFS='|' read -r pid tty host cwd comm <<< "$row"
+    [ "$host" = "tmux" ] && continue
+    [ -d "$cwd" ] || { info "salto $pid: '$cwd' no existe"; continue; }
+
+    # Una ventana por directorio: dos pestanas en el mismo sitio no aportan
+    # nada y en el movil solo estorban.
+    case "$SEEN" in *"|$cwd|"*) info "salto $pid: ya hay ventana para $cwd"; continue ;; esac
+    SEEN="$SEEN|$cwd|"
+
+    if [ "$cwd" = "$HOME" ]; then name="home"; else name="$(basename "$cwd")"; fi
+    # tmux no admite ':' ni '.' en el nombre de ventana.
+    name="$(printf '%s' "$name" | tr ':.' '--')"
+
+    tmux new-window -t "$SESSION:" -n "$name" -c "$cwd"
+    info "ventana '$name' creada en $cwd  (clon de $pid, $host)"
+    N=$((N + 1))
+done
+
+printf '\n'
+if [ $N -eq 0 ]; then
+    info "no se creo ninguna ventana"
+else
+    info "$N ventana(s) nuevas en la sesion '$SESSION'"
+    info "Las shells originales siguen donde estaban, intactas."
+    info "Atacate con:  vibe        (o  vibe mobile  desde el iPhone)"
+fi

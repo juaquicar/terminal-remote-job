@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+#
+# vibe-adopt - Mete un proceso que YA se esta ejecutando dentro de tmux, para
+# poder verlo y controlarlo desde el movil.
+#
+# tmux solo puede atacarse a lo que nacio dentro de el. Si lanzaste `claude` en
+# una terminal normal (Ptyxis, PyCharm, VS Code...), esa sesion queda fuera de
+# su alcance. `reptyr` resuelve eso: usa ptrace para reasignar los descriptores
+# de terminal del proceso a otro pty; en la practica, lo mueve de tu terminal
+# grafica a un panel de tmux, sin matarlo ni perder su estado.
+#
+# Uso:
+#   vibe-adopt --list          Lista los agentes que hay corriendo y donde.
+#   vibe-adopt PID             Adopta ese proceso en el panel tmux ACTUAL.
+#   vibe-adopt PID --steal     Modo TTY-stealing (-T). Solo si el normal falla:
+#                              no funciona con Ptyxis / GNOME Terminal, que
+#                              tienen el pty maestro en un proceso agente.
+#   vibe-adopt PID --sysctl    En vez de sudo reptyr, baja temporalmente
+#                              kernel.yama.ptrace_scope y lo restaura solo.
+#
+# Tiene que ejecutarse DENTRO de un panel de tmux: el proceso aterriza ahi.
+# Lo habitual: `vibe` -> ir a la ventana `claude` -> `vibe-adopt 78350`.
+#
+# LIMITACIONES, por delante:
+#   - reptyr puede fallar. Las TUI con muchos hilos (los agentes son Node/Bun)
+#     son el caso dificil. Si falla, el proceso normalmente sigue vivo en su
+#     terminal original, pero puede morir. No lo uses sobre trabajo sin guardar.
+#   - Al adoptarlo, la ventana original (Ptyxis, PyCharm) queda muerta.
+#   - Puede hacer falta forzar un redibujado: redimensiona el panel de tmux o
+#     pulsa Ctrl+l si la interfaz aparece descuadrada.
+#
+# Alternativa sin riesgo: relanzar el agente dentro de tmux recuperando la
+# conversacion (`claude --continue`). Ver docs/adoptar-procesos.md.
+#
+set -euo pipefail
+
+PID=""
+USE_SYSCTL=0
+LIST=0
+STEAL=0
+
+die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+info() { printf '\033[36m::\033[0m %s\n' "$*"; }
+warn() { printf '\033[33m!!\033[0m %s\n' "$*"; }
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --list|-l)  LIST=1; shift ;;
+        --steal|-T) STEAL=1; shift ;;
+        --sysctl)   USE_SYSCTL=1; shift ;;
+        -h|--help)  sed -n '3,33p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        [0-9]*)     PID="$1"; shift ;;
+        *)          die "opcion desconocida: $1" ;;
+    esac
+done
+
+# --- Listado ----------------------------------------------------------------
+if [ $LIST -eq 1 ]; then
+    printf '\n\033[1m%-8s %-8s %-10s %s\033[0m\n' PID TTY DONDE COMANDO
+    ps -eo pid,tty,args --no-headers \
+        | grep -E '(^| )(claude|opencode|codex)( |$)' \
+        | grep -vE 'grep|vibe-adopt|--chrome-native-host|mcp|lsp' \
+        | while read -r pid tty rest; do
+            where="terminal"
+            # ¿Cuelga del servidor tmux?
+            if pstree -sp "$pid" 2>/dev/null | grep -q 'tmux'; then
+                where="TMUX"
+            fi
+            printf '%-8s %-8s %-10s %s\n' "$pid" "$tty" "$where" "${rest:0:60}"
+        done
+    printf '\nLos marcados TMUX ya los ves desde el movil. Los otros se pueden\n'
+    printf 'adoptar:  vibe-adopt <PID>   (desde dentro del panel destino)\n\n'
+    exit 0
+fi
+
+[ -n "$PID" ] || die "falta el PID. Usa: vibe-adopt --list"
+
+# --- Comprobaciones ---------------------------------------------------------
+# NO anteponer sudo a este script. Sudo resetea el PATH al secure_path de
+# /etc/sudoers (que no incluye ~/terminal-remote-job/bin, de ahi el "command not
+# found") y ademas borra $TMUX, con lo que el script no sabria donde aterrizar.
+# El sudo lo pone el propio script, y solo sobre reptyr.
+if [ -n "${SUDO_USER:-}" ] || [ "$(id -u)" -eq 0 ]; then
+    die "no lo lances con sudo.
+
+       Ejecuta:   vibe-adopt $PID
+       No:        sudo vibe-adopt $PID
+
+       El script ya llama a 'sudo reptyr' por dentro y te pedira la
+       contrasena en su momento. Con sudo por delante se pierde \$TMUX y
+       el PATH, que es lo que necesita para funcionar."
+fi
+
+[ -n "${TMUX:-}" ] || die "esto hay que ejecutarlo DENTRO de un panel de tmux.
+       Haz primero:  vibe      y ve a la ventana donde quieras que aterrice."
+
+REPTYR="$(command -v reptyr || true)"
+[ -n "$REPTYR" ] || die "reptyr no instalado:  sudo apt install reptyr"
+
+kill -0 "$PID" 2>/dev/null || die "el proceso $PID no existe"
+
+CMD="$(ps -o args= -p "$PID" | head -1)"
+OLDTTY="$(ps -o tty= -p "$PID" | tr -d ' ')"
+
+# Si ya esta bajo tmux no hay nada que adoptar.
+if pstree -sp "$PID" 2>/dev/null | grep -q 'tmux'; then
+    die "el proceso $PID ya cuelga de tmux; no hace falta adoptarlo"
+fi
+
+printf '\n  \033[1mPID:\033[0m     %s\n  \033[1mComando:\033[0m %s\n  \033[1mTTY:\033[0m     %s\n' \
+       "$PID" "${CMD:0:70}" "$OLDTTY"
+printf '  \033[1mDestino:\033[0m %s\n\n' "$(tty)"
+
+warn "reptyr puede fallar y, en el peor caso, matar el proceso."
+warn "La ventana original ($OLDTTY) quedara inservible."
+printf '\n  Escribe \033[1mSI\033[0m para continuar: '
+read -r ANSWER
+[ "$ANSWER" = "SI" ] || { info "cancelado, no se ha tocado nada"; exit 0; }
+
+# --- ptrace -----------------------------------------------------------------
+SCOPE="$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo 0)"
+SUDO=""
+
+if [ "$SCOPE" = "0" ]; then
+    info "ptrace_scope=0, adelante sin privilegios"
+
+elif [ $USE_SYSCTL -eq 1 ]; then
+    # Baja ptrace_scope el tiempo justo. Mientras este a 0, cualquier proceso
+    # tuyo puede inspeccionar la memoria de cualquier otro proceso tuyo, asi
+    # que se restaura solo a los 30 segundos pase lo que pase.
+    warn "bajando kernel.yama.ptrace_scope a 0 durante 30 segundos"
+    sudo sysctl -q -w kernel.yama.ptrace_scope=0
+    setsid nohup bash -c "sleep 30; sudo sysctl -q -w kernel.yama.ptrace_scope=$SCOPE" \
+        >/dev/null 2>&1 < /dev/null &
+    info "se restaurara a $SCOPE automaticamente"
+
+else
+    # Ruta absoluta a proposito: el secure_path de sudo puede no coincidir con
+    # tu PATH.
+    info "ptrace_scope=$SCOPE -> reptyr necesita root; sudo puede pedirte la clave"
+    SUDO="sudo"
+fi
+
+# --- Adopcion ---------------------------------------------------------------
+# Modo por defecto: reptyr normal, que hace ptrace directo sobre el proceso.
+#
+# El modo -T ("TTY-stealing") NO hace ptrace: busca el emulador de terminal y
+# le roba el extremo maestro del pty. Suena mejor, pero falla con los emuladores
+# de modelo cliente-servidor -- Ptyxis, GNOME Terminal, Konsole -- porque el
+# maestro lo tiene un proceso agente compartido, con un pty por pestana, y
+# reptyr no acierta cual es. Sintoma exacto:
+#
+#     [-] Unable to find the fd for the pty!
+#     Unable to attach to pid N: No such process
+#
+# Por eso -T queda detras de --steal, y no como opcion por defecto.
+if [ $STEAL -eq 1 ]; then
+    info "modo TTY-stealing (-T)"
+    set +e; $SUDO "$REPTYR" -T "$PID"; RC=$?; set -e
+    OTRO="sin --steal (modo ptrace normal)"
+else
+    info "adoptando $PID..."
+    set +e; $SUDO "$REPTYR" "$PID"; RC=$?; set -e
+    OTRO="con --steal (modo TTY-stealing)"
+fi
+
+if [ $RC -ne 0 ]; then
+    printf '\n'
+    warn "reptyr fallo (codigo $RC). El proceso sigue en $OLDTTY, no se ha perdido."
+    printf '\n  Cosas que probar, en orden:\n\n'
+    printf '    1. El otro modo:   vibe-adopt %s %s\n' "$PID" "$([ $STEAL -eq 1 ] && echo '' || echo '--steal')"
+    printf '       (%s)\n\n' "$OTRO"
+    printf '    2. Forzar los descriptores 0,1,2:\n'
+    printf '       %s reptyr -s %s\n\n' "${SUDO:-}" "$PID"
+    printf '    3. Rendirse con elegancia: dejarlo donde esta y verlo en vivo con\n'
+    printf '       vibe-watch, que es solo lectura y no falla nunca.\n\n'
+    exit "$RC"
+fi
+
+# reptyr deja el proceso "parado" a ojos de la shell original.
+printf '\n'
+info "adoptado. En la terminal original ($OLDTTY) conviene ejecutar:  bg; disown"
+info "Si la interfaz sale descuadrada: redimensiona el panel o pulsa Ctrl+l"

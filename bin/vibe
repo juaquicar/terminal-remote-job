@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+#
+# vibe - Crea o retoma la sesion tmux con los agentes CLI.
+#
+# Uso:
+#   vibe                  Crea la sesion si no existe y se ataca a ella.
+#   vibe mobile           Se ataca en modo movil (ver mas abajo).
+#   vibe start            Crea la sesion en segundo plano, sin atacarse.
+#   vibe kill             Mata la sesion y todo lo que corra dentro.
+#   vibe --no-autostart   Al crear, no lanza los agentes; solo abre las shells.
+#   vibe -d DIR           Directorio de trabajo de las ventanas.
+#   vibe -s NOMBRE        Usa otro nombre de sesion (por defecto: vibe).
+#
+# Modo movil:
+#   Crea una sesion "agrupada" (tmux new-session -t) que comparte las mismas
+#   ventanas que la principal pero mantiene su propio tamano y su propia
+#   ventana activa. Asi puedes tener el portatil en la ventana de claude y el
+#   iPhone en la de codex a la vez, sin que uno encoja al otro.
+#
+set -euo pipefail
+
+# Raiz del proyecto, deducida de la ubicacion real de este script: asi funciona
+# clonado en cualquier sitio, y tambien a traves de un symlink en el PATH.
+AR_HOME="${AR_HOME:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)}"
+TMUX_CONF="$AR_HOME/config/tmux.conf"
+AGENTS_CONF="$AR_HOME/config/agents.conf"
+
+SESSION="${VIBE_SESSION:-vibe}"
+WORKDIR="${VIBE_DIR:-$HOME}"
+AUTOSTART=1
+ACTION="attach"
+
+die() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+info() { printf '\033[36m::\033[0m %s\n' "$*"; }
+
+# --- Argumentos -------------------------------------------------------------
+while [ $# -gt 0 ]; do
+    case "$1" in
+        mobile|start|kill|attach) ACTION="$1"; shift ;;
+        --no-autostart)           AUTOSTART=0; shift ;;
+        -d|--dir)                 WORKDIR="${2:?-d necesita un directorio}"; shift 2 ;;
+        -s|--session)             SESSION="${2:?-s necesita un nombre}"; shift 2 ;;
+        -h|--help)                sed -n '3,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *)                        die "opcion desconocida: $1 (prueba: vibe --help)" ;;
+    esac
+done
+
+command -v tmux >/dev/null || die "tmux no esta instalado. Ejecuta $AR_HOME/install.sh"
+[ -f "$TMUX_CONF" ] || die "falta $TMUX_CONF"
+[ -d "$WORKDIR" ]   || die "el directorio de trabajo no existe: $WORKDIR"
+
+# --- PATH de los agentes ----------------------------------------------------
+# Se sourcea ANTES de arrancar el servidor tmux para que el servidor herede el
+# PATH corregido; todas las ventanas que se creen despues lo tendran.
+# shellcheck source=/dev/null
+[ -f "$AR_HOME/bin/env.sh" ] && source "$AR_HOME/bin/env.sh"
+
+tm() { tmux -f "$TMUX_CONF" "$@"; }
+
+session_exists() { tmux has-session -t "=$SESSION" 2>/dev/null; }
+
+# --- kill -------------------------------------------------------------------
+if [ "$ACTION" = "kill" ]; then
+    session_exists || die "la sesion '$SESSION' no existe"
+    tmux kill-session -t "=$SESSION"
+    # La sesion agrupada del movil muere con la principal, pero por si acaso.
+    tmux kill-session -t "=${SESSION}-mobile" 2>/dev/null || true
+    info "sesion '$SESSION' eliminada"
+    exit 0
+fi
+
+# --- Crear la sesion si hace falta -------------------------------------------
+create_session() {
+    info "creando sesion '$SESSION' en $WORKDIR"
+
+    tm new-session -d -s "$SESSION" -c "$WORKDIR" -n "__tmp__"
+
+    # El PATH corregido tambien como variable global del servidor: asi las
+    # ventanas creadas a mano mas tarde (prefijo + c) tambien ven los agentes.
+    tmux set-environment -g PATH "$PATH"
+
+    local first=1
+    while IFS='|' read -r name cmd dir; do
+        name="$(echo "$name" | xargs)"
+        cmd="$(echo "${cmd:-}" | xargs)"
+        dir="$(echo "${dir:-}" | xargs)"
+
+        [ -z "$name" ] && continue
+        case "$name" in \#*) continue ;; esac
+
+        if [ -n "$dir" ]; then
+            eval "dir=$dir"                      # expande ~ y $VARS
+        else
+            dir="$WORKDIR"
+        fi
+        [ -d "$dir" ] || { info "aviso: '$dir' no existe, uso $WORKDIR para '$name'"; dir="$WORKDIR"; }
+
+        if [ $first -eq 1 ]; then
+            # La ventana 1 ya existe (creada con -c "$WORKDIR"); solo se
+            # renombra, y se hace cd unicamente si agents.conf pide otro sitio.
+            tmux rename-window -t "$SESSION:1" "$name"
+            [ "$dir" != "$WORKDIR" ] && tmux send-keys -t "$SESSION:1" "cd $(printf '%q' "$dir")" C-m
+            first=0
+        else
+            tmux new-window -t "$SESSION:" -n "$name" -c "$dir"
+        fi
+
+        if [ -n "$cmd" ] && [ $AUTOSTART -eq 1 ]; then
+            tmux send-keys -t "$SESSION:$name" "$cmd" C-m
+        fi
+    done < "$AGENTS_CONF"
+
+    # Si agents.conf estaba vacio, dejar al menos una shell utilizable.
+    if [ $first -eq 1 ]; then
+        tmux rename-window -t "$SESSION:1" "shell"
+    fi
+
+    tmux select-window -t "$SESSION:1"
+}
+
+if ! session_exists; then
+    [ -f "$AGENTS_CONF" ] || die "falta $AGENTS_CONF"
+    create_session
+else
+    info "la sesion '$SESSION' ya existe, me ataco a ella"
+fi
+
+# --- start: no atacarse -----------------------------------------------------
+if [ "$ACTION" = "start" ]; then
+    info "sesion lista en segundo plano. Atacate con: vibe"
+    exit 0
+fi
+
+# --- attach -----------------------------------------------------------------
+if [ "$ACTION" = "mobile" ]; then
+    MOBILE="${SESSION}-mobile"
+    if ! tmux has-session -t "=$MOBILE" 2>/dev/null; then
+        # -t agrupa: mismas ventanas, tamano y ventana activa independientes.
+        tm new-session -d -s "$MOBILE" -t "$SESSION"
+    fi
+    exec tmux attach-session -t "=$MOBILE"
+fi
+
+exec tmux attach-session -t "=$SESSION"

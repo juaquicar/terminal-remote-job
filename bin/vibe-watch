@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+"""
+vibe-watch - Ver EN VIVO lo que hace un agente sin tocarlo.
+
+El problema que resuelve: si un agente esta a mitad de una tarea, no puedes
+cerrarlo para relanzarlo dentro de tmux (perderias el trabajo en vuelo), y
+adoptarlo con reptyr es arriesgado justo cuando menos te lo puedes permitir.
+
+Pero los agentes van escribiendo la transcripcion de la sesion en disco segun
+trabajan. Esto la sigue con tail y la pinta legible. Es SOLO LECTURA: no
+adjunta ptrace, no toca el proceso, no puede romper nada. Funciona desde el
+movil como cualquier otro comando.
+
+Lo que NO da: control. Ves lo que pasa, no puedes contestar. Para responder al
+agente hace falta la terminal real (reptyr) o relanzarlo dentro de tmux.
+
+Uso:
+  vibe-watch --list          Sesiones activas y cuando se escribieron.
+  vibe-watch                 Sigue la mas reciente.
+  vibe-watch 2               Sigue la numero 2 del listado.
+  vibe-watch RUTA.jsonl      Sigue ese archivo.
+
+  --all       Volcar todo el historico antes de seguir (por defecto: ultimas 15)
+  --thinking  Mostrar tambien los bloques de razonamiento
+  --width N   Ancho de recorte (por defecto: el del terminal)
+
+Soporta Claude Code (~/.claude/projects) y codex (~/.codex/sessions).
+opencode guarda su estado en SQLite, no en JSONL, y no esta soportado.
+"""
+import json
+import os
+import sys
+import time
+import shutil
+from pathlib import Path
+
+# Salida linea a linea: si no, Python bufferea al redirigir o al pasar por
+# tuberia, y lo que se ve en el movil llega a golpes de 4 KB en vez de segun
+# ocurre. Un visor en vivo que se ve a trompicones no sirve de nada.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except AttributeError:
+    pass
+
+C = {
+    "user": "\033[1;36m", "agent": "\033[0;37m", "tool": "\033[0;33m",
+    "res": "\033[0;90m", "think": "\033[2;35m", "err": "\033[0;31m",
+    "hdr": "\033[1;34m", "dim": "\033[2m", "off": "\033[0m",
+}
+if not sys.stdout.isatty():
+    C = {k: "" for k in C}
+
+CLAUDE_DIR = Path.home() / ".claude" / "projects"
+CODEX_DIR = Path.home() / ".codex" / "sessions"
+
+
+def width():
+    return shutil.get_terminal_size((100, 24)).columns
+
+
+def sessions():
+    """Todas las transcripciones conocidas, la mas reciente primero."""
+    out = []
+    for f in CLAUDE_DIR.glob("*/*.jsonl"):
+        out.append(("claude", f))
+    for f in CODEX_DIR.glob("*/*/*/*.jsonl"):
+        out.append(("codex", f))
+    out.sort(key=lambda p: p[1].stat().st_mtime, reverse=True)
+    return out
+
+
+def project_of(kind, path):
+    if kind == "claude":
+        # El directorio es el cwd con las barras convertidas en guiones.
+        return "/" + path.parent.name.strip("-").replace("-", "/")
+    return path.stem[:40]
+
+
+def do_list():
+    now = time.time()
+    rows = sessions()
+    if not rows:
+        print("No hay transcripciones. ¿Algun agente ha llegado a arrancar?")
+        return
+    print(f"\n{C['hdr']}{'#':<3} {'AGENTE':<8} {'ULT.':<8} {'PROYECTO'}{C['off']}")
+    for i, (kind, f) in enumerate(rows[:15], 1):
+        age = now - f.stat().st_mtime
+        if age < 90:
+            ago, col = f"{int(age)}s", "\033[1;32m"   # activa ahora mismo
+        elif age < 3600:
+            ago, col = f"{int(age/60)}min", ""
+        elif age < 86400:
+            ago, col = f"{int(age/3600)}h", C["dim"]
+        else:
+            ago, col = f"{int(age/86400)}d", C["dim"]
+        print(f"{col}{i:<3} {kind:<8} {ago:<8} {project_of(kind, f)}{C['off']}")
+    print(f"\n{C['dim']}En verde, las que han escrito hace menos de 90 segundos.")
+    print(f"Seguir una:  vibe-watch <numero>{C['off']}\n")
+
+
+def clip(text, n):
+    text = " ".join(str(text).split())
+    return text if len(text) <= n else text[: n - 1] + "…"
+
+
+def render_claude(d, w, show_thinking):
+    t = d.get("type")
+    if t == "user":
+        msg = d.get("message", {})
+        content = msg.get("content")
+        if isinstance(content, str):
+            print(f"\n{C['user']}▶ TU  {clip(content, w - 8)}{C['off']}")
+        elif isinstance(content, list):
+            for b in content:
+                if b.get("type") == "tool_result":
+                    body = b.get("content", "")
+                    if isinstance(body, list):
+                        body = " ".join(
+                            x.get("text", "") for x in body if isinstance(x, dict)
+                        )
+                    tag = "ERROR" if b.get("is_error") else "ok"
+                    col = C["err"] if b.get("is_error") else C["res"]
+                    print(f"  {col}└ {tag}: {clip(body, w - 12)}{C['off']}")
+                elif b.get("type") == "text":
+                    print(f"\n{C['user']}▶ TU  {clip(b.get('text',''), w - 8)}{C['off']}")
+
+    elif t == "assistant":
+        for b in d.get("message", {}).get("content", []):
+            bt = b.get("type")
+            if bt == "text" and b.get("text", "").strip():
+                for line in b["text"].rstrip().split("\n"):
+                    print(f"{C['agent']}{clip(line, w) if line.strip() else ''}{C['off']}")
+            elif bt == "thinking" and show_thinking:
+                print(f"{C['think']}  ~ {clip(b.get('thinking',''), w - 6)}{C['off']}")
+            elif bt == "tool_use":
+                name = b.get("name", "?")
+                inp = b.get("input", {})
+                hint = (
+                    inp.get("command")
+                    or inp.get("file_path")
+                    or inp.get("pattern")
+                    or inp.get("prompt")
+                    or ""
+                )
+                print(f"  {C['tool']}⚙ {name}  {clip(hint, w - len(name) - 8)}{C['off']}")
+
+
+def render_codex(d, w, show_thinking):
+    if d.get("type") != "event_msg":
+        return
+    p = d.get("payload", {})
+    pt = p.get("type")
+    if pt == "user_message":
+        print(f"\n{C['user']}▶ TU  {clip(p.get('message',''), w - 8)}{C['off']}")
+    elif pt == "agent_message":
+        for line in str(p.get("message", "")).rstrip().split("\n"):
+            print(f"{C['agent']}{clip(line, w) if line.strip() else ''}{C['off']}")
+    elif pt == "patch_apply_end":
+        col = C["res"] if p.get("success") else C["err"]
+        estado = "aplicado" if p.get("success") else "FALLO"
+        print(f"  {col}⚙ patch {estado}: {clip(p.get('stdout') or p.get('stderr') or '', w - 22)}{C['off']}")
+    elif pt == "task_complete":
+        ms = p.get("duration_ms", 0)
+        print(f"\n{C['hdr']}── tarea completada en {ms/1000:.1f}s ──{C['off']}")
+
+
+def follow(kind, path, show_thinking, tail_n, w):
+    render = render_claude if kind == "claude" else render_codex
+    print(f"{C['hdr']}── {project_of(kind, path)} ──{C['off']}")
+    print(f"{C['dim']}{path}")
+    print(f"solo lectura, el agente no se entera. Ctrl+c para salir.{C['off']}")
+
+    with open(path, "r", errors="replace") as fh:
+        lines = fh.readlines()
+        for line in lines[-tail_n:] if tail_n else lines:
+            try:
+                render(json.loads(line), w, show_thinking)
+            except (json.JSONDecodeError, KeyError, TypeError):
+                pass
+        print(f"\n{C['dim']}── esperando novedades ──{C['off']}")
+
+        buf = ""
+        while True:
+            chunk = fh.readline()
+            if not chunk:
+                time.sleep(0.4)
+                continue
+            buf += chunk
+            if not buf.endswith("\n"):
+                continue          # linea a medio escribir; esperar al resto
+            try:
+                render(json.loads(buf), w, show_thinking)
+            except (json.JSONDecodeError, KeyError, TypeError):
+                pass
+            buf = ""
+
+
+def main():
+    args = sys.argv[1:]
+    if "-h" in args or "--help" in args:
+        print(__doc__)
+        return
+    if "--list" in args or "-l" in args:
+        do_list()
+        return
+
+    show_thinking = "--thinking" in args
+    tail_n = 0 if "--all" in args else 15
+    w = width()
+    if "--width" in args:
+        w = int(args[args.index("--width") + 1])
+    positional = [a for a in args if not a.startswith("-") and not a.isdigit() or a.isdigit()]
+    positional = [a for a in positional if a != str(w)]
+
+    rows = sessions()
+    if not rows:
+        sys.exit("No hay transcripciones de ningun agente.")
+
+    target = None
+    for a in positional:
+        if a.isdigit():
+            i = int(a)
+            if not 1 <= i <= len(rows):
+                sys.exit(f"No existe la sesion {i}. Mira: vibe-watch --list")
+            target = rows[i - 1]
+            break
+        p = Path(a)
+        if p.is_file():
+            target = ("codex" if "codex" in str(p) else "claude", p)
+            break
+        sys.exit(f"No encuentro: {a}")
+
+    if target is None:
+        target = rows[0]
+
+    try:
+        follow(target[0], target[1], show_thinking, tail_n, w)
+    except KeyboardInterrupt:
+        print(f"\n{C['dim']}fin. El agente sigue trabajando.{C['off']}")
+
+
+if __name__ == "__main__":
+    main()

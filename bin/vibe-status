@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+#
+# vibe-status - Diagnostico de un vistazo: que falta para poder conectarse
+# desde el movil y que hay corriendo ahora mismo.
+#
+set -uo pipefail
+
+# Raiz del proyecto, deducida de la ubicacion real de este script: asi funciona
+# clonado en cualquier sitio, y tambien a traves de un symlink en el PATH.
+AR_HOME="${AR_HOME:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)}"
+
+ok()   { printf '  \033[32mOK\033[0m    %s\n' "$*"; }
+bad()  { printf '  \033[31mFALTA\033[0m %s\n' "$*"; }
+warn() { printf '  \033[33mAVISO\033[0m %s\n' "$*"; }
+head_() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+
+head_ "Paquetes"
+for b in tmux sshd mosh-server tailscale; do
+    if command -v "$b" >/dev/null 2>&1 || [ -x "/usr/sbin/$b" ]; then
+        ok "$b"
+    else
+        bad "$b   (lo instala $AR_HOME/install.sh)"
+    fi
+done
+
+head_ "Servicio SSH"
+if systemctl is-active --quiet ssh 2>/dev/null; then
+    ok "ssh.service activo"
+    port=$(ss -tlnp 2>/dev/null | awk '/sshd/ {print $4}' | paste -sd' ')
+    [ -n "$port" ] && printf '        escuchando en: %s\n' "$port"
+else
+    bad "ssh.service parado   ->  sudo systemctl enable --now ssh"
+fi
+
+head_ "Claves SSH"
+AK="$HOME/.ssh/authorized_keys"
+if [ -s "$AK" ]; then
+    n=$(grep -cvE '^\s*(#|$)' "$AK")
+    ok "$n clave(s) en authorized_keys"
+else
+    warn "sin authorized_keys: aun no puedes entrar con clave publica"
+fi
+
+head_ "Tailscale"
+if command -v tailscale >/dev/null 2>&1; then
+    st=$(tailscale status 2>&1 | head -1)
+    ip=$(tailscale ip -4 2>/dev/null | head -1)
+    if [ -n "$ip" ]; then
+        ok "conectado"
+        printf '        IP tailnet: \033[1m%s\033[0m\n' "$ip"
+        printf '        hostname:   \033[1m%s\033[0m\n' "$(tailscale status --json 2>/dev/null | grep -m1 '"DNSName"' | cut -d'"' -f4 | sed 's/\.$//')"
+    else
+        bad "$st   ->  sudo tailscale up"
+    fi
+else
+    bad "tailscale no instalado"
+fi
+
+head_ "Sesiones tmux"
+if tmux ls >/dev/null 2>&1; then
+    tmux list-sessions -F '  #{session_name}  (#{session_windows} ventanas, #{session_attached} clientes atachados)'
+    printf '\n'
+    tmux list-windows -a -F '    #{session_name}:#{window_index} #{window_name}  [#{pane_current_command}]#{?window_activity_flag, *actividad*,}'
+else
+    warn "ningun servidor tmux corriendo   ->  vibe start"
+fi
+
+head_ "Agentes en el PATH"
+# shellcheck source=/dev/null
+[ -f "$AR_HOME/bin/env.sh" ] && source "$AR_HOME/bin/env.sh"
+for a in claude opencode codex; do
+    p=$(command -v "$a" 2>/dev/null)
+    if [ -n "$p" ]; then ok "$a  ->  $p"; else bad "$a no encontrado"; fi
+done
+
+head_ "Suspension del portatil"
+# Si el equipo se suspende, las sesiones tmux siguen vivas pero inaccesibles
+# desde el movil hasta que vuelva a despertar.
+if systemctl is-enabled --quiet suspend.target 2>/dev/null; then
+    warn "suspend.target activo: al cerrar la tapa perderas el acceso remoto"
+    printf '        ver: %s/docs/troubleshooting.md\n' "$AR_HOME"
+else
+    ok "suspend.target desactivado"
+fi
+
+printf '\n'
