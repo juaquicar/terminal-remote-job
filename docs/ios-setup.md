@@ -164,11 +164,22 @@ no lo hace. Los agentes siguen trabajando.
 ## 7. Ver un servidor de desarrollo desde el móvil
 
 Como el iPhone está dentro del tailnet, no necesitas túneles SSH. Si un agente
-levanta un dev server en el puerto 3000, en Safari del iPhone:
+levanta un dev server en el puerto 5173, en Safari del iPhone:
 
 ```
-http://100.x.y.z:3000
+http://100.x.y.z:5173
 ```
 
 Requisito: que el server escuche en `0.0.0.0` y no solo en `127.0.0.1`
 (en Vite, `--host`; en Next.js, `-H 0.0.0.0`).
+
+Antes de elegir puerto, comprueba que está libre:
+
+```bash
+ss -tlnH | awk '{print $4}' | sed 's/.*://' | sort -nu
+```
+
+Y ten presente que **todo lo que escuche en `0.0.0.0` queda visible para todo
+el tailnet**, no solo para tu iPhone. Si el tailnet tiene más dispositivos o lo
+compartes con alguien, ata el dev server a la IP del tailnet en vez de a todas
+las interfaces.

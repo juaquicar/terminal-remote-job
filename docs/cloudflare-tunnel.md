@@ -166,7 +166,7 @@ corriendo de un día para otro.
 ## Lo que Cloudflare no te da
 
 - **Puertos que no son HTTP/SSH**: si un agente levanta un dev server, con
-  Tailscale lo abres en `http://100.x.y.z:3000` sin más. Con Cloudflare hay que
+  Tailscale lo abres en `http://100.x.y.z:5173` sin más. Con Cloudflare hay que
   añadir otro hostname al `ingress` y otra aplicación de Access por cada
   puerto.
 - **mosh**: mosh necesita UDP directo. No pasa por Cloudflare Tunnel. Sin mosh,
