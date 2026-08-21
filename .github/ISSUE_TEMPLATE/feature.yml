@@ -1,0 +1,23 @@
+name: Propuesta
+description: Una idea para mejorar esto
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problema
+    attributes:
+      label: Qué problema resuelve
+      description: El problema primero, la solución después. Ayuda a valorar alternativas.
+    validations:
+      required: true
+  - type: textarea
+    id: propuesta
+    attributes:
+      label: Qué propones
+    validations:
+      required: true
+  - type: checkboxes
+    id: seguridad
+    attributes:
+      label: Seguridad
+      options:
+        - label: "Esta propuesta NO implica bajar ninguna protección (NOPASSWD, servicios sin auth, ptrace_scope permanente a 0)"

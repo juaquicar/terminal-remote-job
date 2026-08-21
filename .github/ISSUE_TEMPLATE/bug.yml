@@ -1,0 +1,48 @@
+name: Fallo
+description: Algo no funciona como dice la documentación
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Gracias por reportarlo. Español o inglés, como prefieras.
+  - type: textarea
+    id: status
+    attributes:
+      label: Salida de vibe-status
+      description: "Ejecuta `bin/vibe-status` y pega el resultado completo."
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: distro
+    attributes:
+      label: Distribución y versión
+      placeholder: "Ubuntu 26.04"
+    validations:
+      required: true
+  - type: input
+    id: terminal
+    attributes:
+      label: Emulador de terminal
+      description: Desde dónde lanzas los agentes. Importa mucho para reptyr.
+      placeholder: "Ptyxis / GNOME Terminal / PyCharm / VS Code / Alacritty…"
+    validations:
+      required: true
+  - type: textarea
+    id: esperado
+    attributes:
+      label: Qué esperabas y qué pasó
+    validations:
+      required: true
+  - type: textarea
+    id: reptyr
+    attributes:
+      label: "Solo si el fallo es de vibe-adopt"
+      description: |
+        Pega la salida de:
+        ```
+        cat /proc/sys/kernel/yama/ptrace_scope
+        pstree -sp <PID-del-proceso>
+        ```
+      render: text

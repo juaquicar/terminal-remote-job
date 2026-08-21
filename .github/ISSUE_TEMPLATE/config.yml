@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Problema de seguridad
+    url: https://github.com/juaquicar/terminal-remote-job/security/advisories/new
+    about: No lo reportes como issue público. Usa un security advisory.
